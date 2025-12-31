@@ -1,0 +1,164 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MND Collection Tracker</title>
+
+  <link href="https://unpkg.com/tabulator-tables@5.6.4/dist/css/tabulator.min.css" rel="stylesheet"/>
+
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
+    .bar { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin: 12px 0 10px; }
+    #status { font-size: 14px; margin: 6px 0 12px; }
+    #card-table { border: 1px solid rgba(0,0,0,0.1); border-radius: 10px; overflow: hidden; }
+    button { cursor:pointer; padding: 8px 12px; }
+  </style>
+</head>
+<body>
+
+  <div class="bar">
+    <button id="download-csv" type="button">Download CSV</button>
+
+    <label style="display:inline-flex; gap:8px; align-items:center;">
+      Upload CSV:
+      <input type="file" id="upload-csv" accept=".csv" />
+    </label>
+  </div>
+
+  <div id="status">Status: starting…</div>
+  <div id="card-table"></div>
+
+  <script src="https://unpkg.com/tabulator-tables@5.6.4/dist/js/tabulator.min.js"></script>
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <script>
+    const MASTER_CSV_URL =
+      "https://raw.githubusercontent.com/rayjes-gym-shorts/all-mnd-cards-granular/main/List%20of%20All%20MND%20Cards.xlsx%20-%20allsets.csv";
+
+    const statusEl = document.getElementById("status");
+    const setStatus = (msg) => statusEl.textContent = "Status: " + msg;
+
+    function pickField(headers, candidates) {
+      const lower = headers.map(h => String(h || "").trim().toLowerCase());
+      for (const c of candidates) {
+        const idx = lower.indexOf(String(c).toLowerCase());
+        if (idx !== -1) return headers[idx];
+      }
+      return null;
+    }
+
+    setStatus("initializing table…");
+
+    const table = new Tabulator("#card-table", {
+      data: [],
+      layout: "fitColumns",
+      height: "80vh",     // virtualization on
+      reactiveData: true,
+      placeholder: "No data",
+      columns: [
+        { title: "Card Name", field: "_name", headerFilter: "input", frozen: true },
+        { title: "Region", field: "_region", headerFilter: "input" },
+        { title: "Type", field: "_type", headerFilter: "input" },
+        { title: "Set", field: "_set", headerFilter: "input" },
+        { title: "Cost", field: "_cost", sorter: "number" },
+        { title: "Quantity Owned", field: "quantityOwned", editor: "input", width: 170 }
+      ]
+    });
+
+    setStatus("fetching master CSV…");
+
+    fetch(MASTER_CSV_URL + "?v=" + Date.now())
+      .then(res => {
+        if (!res.ok) throw new Error("Fetch failed (HTTP " + res.status + ")");
+        return res.text();
+      })
+      .then(csvText => {
+        setStatus("parsing CSV…");
+
+        Papa.parse(csvText, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (results) => {
+            const headers = results?.meta?.fields || [];
+            if (!headers.length) throw new Error("No headers found in CSV");
+
+            const nameField = pickField(headers, ["name", "card name", "card", "cardname", "card_name"]);
+            const regionField = pickField(headers, ["region", "regions"]);
+            const typeField = pickField(headers, ["type", "card type", "cardtype", "card_type"]);
+            const setField = pickField(headers, ["set", "sets"]);
+            const costField = pickField(headers, ["cost", "energy", "card cost", "cardcost", "card_cost"]);
+
+            if (!nameField) {
+              throw new Error("Could not detect Card Name column. Headers: " + headers.join(", "));
+            }
+
+            const normalized = (results.data || [])
+              .filter(r => String(r[nameField] ?? "").trim() !== "")
+              .map(r => {
+                const rawCost = costField ? r[costField] : "";
+                return {
+                  _name: r[nameField] ?? "",
+                  _region: regionField ? (r[regionField] ?? "") : "",
+                  _type: typeField ? (r[typeField] ?? "") : "",
+                  _set: setField ? (r[setField] ?? "") : "",
+                  _cost: (rawCost === "" || rawCost == null) ? "" : Number(rawCost),
+                  quantityOwned: ""
+                };
+              });
+
+            table.setData(normalized);
+            setStatus("loaded " + normalized.length + " cards ✅");
+          }
+        });
+      })
+      .catch(err => {
+        console.error(err);
+        table.setData([{ _name: "ERROR: " + err.message, quantityOwned: "" }]);
+        setStatus("error ❌ " + err.message);
+      });
+
+    document.getElementById("download-csv").addEventListener("click", () => {
+      table.download("csv", "collection.csv");
+    });
+
+    document.getElementById("upload-csv").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          const rows = results.data || [];
+          const headers = results?.meta?.fields || [];
+
+          const upNameField = pickField(headers, ["_name", "name", "card name", "card", "cardname", "card_name"]);
+          const upQtyField = pickField(headers, ["quantityowned", "quantity owned", "qty", "quantity", "owned"]);
+
+          if (!upNameField) {
+            alert("Upload CSV must include a name/card name column.");
+            return;
+          }
+
+          const qtyByName = new Map(
+            rows
+              .filter(r => String(r[upNameField] ?? "").trim() !== "")
+              .map(r => [String(r[upNameField]).trim().toLowerCase(), (upQtyField ? (r[upQtyField] ?? "") : "")])
+          );
+
+          const merged = table.getData().map(r => {
+            const key = String(r._name || "").trim().toLowerCase();
+            const q = qtyByName.get(key);
+            return { ...r, quantityOwned: (q !== undefined ? q : r.quantityOwned) };
+          });
+
+          table.setData(merged);
+          setStatus("uploaded quantities merged ✅");
+        }
+      });
+    });
+  </script>
+
+</body>
+</html>
